@@ -95,7 +95,7 @@ loads a local model catalog so `/model` lists the USAi models.
 Replace `/path/to/usai-codex-proxy` and the project path with your own.
 
 ```toml
-model = "gpt-5.5-latest-guardrails-defaultv2"
+model = "gpt-6.1-sol-latest-guardrails-defaultv2"
 model_provider = "usai"
 
 # Local list of USAi models so `/model` in the TUI shows them instead of
@@ -137,37 +137,19 @@ Notes:
 
 ## The model catalog (`usai_models.json`)
 
-Codex builds its `/model` picker from an OpenAI-hosted model catalog it can't
-reach here. `model_catalog_json` overrides that with a local file.
+Codex builds its `/model` picker from an OpenAI-hosted catalog it can't reach
+here, so `model_catalog_json` points it at this local file instead.
 
-The file must match Codex's full `ModelInfo` schema (32 fields with strict
-enums and nested structs), so the entries in `usai_models.json` are cloned from
-Codex's own bundled `gpt-5.5` template with only the `slug`, `display_name`, and
-`description` changed per model.
+The proxy rebuilds it automatically on every startup (`catalog.py`): it asks
+USAi which models it serves and clones each entry from Codex's own bundled
+catalog, so the list stays current with both USAi and your installed Codex. If
+the update fails (e.g. USAi is unreachable), the proxy logs it and keeps the
+existing file. Restart the proxy to pick up new models.
 
-### Regenerating the catalog
-
-If Codex changes its schema in a future release, dump the current bundled
-template and re-stamp the USAi models:
-
-```bash
-codex debug models --bundled -c 'model_catalog_json=""' > /tmp/bundled.json
-```
-
-Then take the first entry as the template, change `slug`/`display_name`/
-`description` for each USAi model, and write the result to
-`usai_models.json` as `{"models": [...]}`.
-
-Verify the catalog parses and lists all models:
-
-```bash
-codex debug models -c 'model="gpt-5.5-latest-guardrails-defaultv2"'
-```
-
-Caveat: because every entry is cloned from the `gpt-5.5` template, all models
-advertise the same context window (272k) and capabilities (image input,
-reasoning summaries, etc.). This only affects what the picker displays; it does
-not change what USAi actually does.
+Models are matched to a bundled entry by slug prefix (e.g.
+`gpt-6.1-sol-latest-guardrails-defaultv2` uses `gpt-6.1-sol`); anything without
+a match, like Claude or Gemini, uses `gpt-5.5`, so the picker shows its context
+window (272k). This is display-only.
 
 ## Everyday usage
 

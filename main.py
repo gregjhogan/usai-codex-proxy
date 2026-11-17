@@ -21,18 +21,18 @@ import sys
 import time
 import uuid
 import argparse
-from pathlib import Path
 import urllib.request
 import urllib.error
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from catalog import CATALOG_PATH, update_catalog
 
 UPSTREAM = os.environ.get("USAI_BASE_URL")
 API_KEY = os.environ.get("USAI_API_KEY")
 LISTEN_HOST = os.environ.get("PROXY_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("PROXY_PORT", "8787"))
 DEBUG = False
-MODEL_CATALOG_PATH = Path(__file__).with_name("usai_models.json")
 
 
 def log(*a):
@@ -91,7 +91,7 @@ def _responses_text_format_to_chat_response_format(text):
 
 
 def _load_codex_model_catalog():
-    with MODEL_CATALOG_PATH.open() as f:
+    with CATALOG_PATH.open() as f:
         data = json.load(f)
     models = data.get("models", []) if isinstance(data, dict) else []
     return [m for m in models if isinstance(m, dict) and m.get("slug")]
@@ -344,6 +344,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def handle_one_request(self):
+        # A client that disconnects mid-request makes socketserver raise an
+        # unhandled ConnectionResetError/BrokenPipeError, which dumps a full
+        # traceback. Swallow it and log one tidy line instead.
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
+            debug_log("client disconnected")
+
     def _api_key(self):
         auth = self.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
@@ -443,10 +453,16 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- streaming ------------------------------------------------------
     def _stream(self, up, model):
+        # HTTP/1.1 keep-alive needs Content-Length or chunked framing to mark
+        # end-of-body; we have neither for a live SSE stream. Close the
+        # connection at end-of-stream so "read until EOF" is a valid body
+        # terminator -- otherwise clients (curl -N, the Codex HTTP client)
+        # hang waiting for more bytes and the review turn never completes.
+        self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self.end_headers()
 
         resp_id = "resp_" + uuid.uuid4().hex
@@ -664,6 +680,10 @@ def main():
         sys.exit("error: USAI_BASE_URL environment variable is required")
     if not API_KEY:
         sys.exit("error: USAI_API_KEY environment variable is required")
+    try:
+        log(f"model catalog: {update_catalog(UPSTREAM, API_KEY)} models -> {CATALOG_PATH}")
+    except Exception as e:
+        log(f"model catalog: update failed, keeping existing file ({e!r})")
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     log(f"listening on http://{LISTEN_HOST}:{LISTEN_PORT}  -> {UPSTREAM}")
     log(f"point codex base_url at http://{LISTEN_HOST}:{LISTEN_PORT}/v1")

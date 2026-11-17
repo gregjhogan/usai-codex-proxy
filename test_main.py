@@ -12,9 +12,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import main
+from catalog import build_catalog
 from main import build_response_from_output, responses_to_chat
 
-TEST_MODEL = "gpt-5.5-latest-guardrails-defaultv2"
+TEST_MODEL = "gpt-6.1-sol-latest-guardrails-defaultv2"
 
 
 class ServerFixture:
@@ -343,6 +344,47 @@ class ProxyTranslationTests(unittest.TestCase):
         self.assertTrue(completed["response"]["output"][0]["id"].startswith("fc_"))
         self.assertEqual(completed["response"]["output"][0]["call_id"], "call_1")
         self.assertEqual(completed["response"]["output"][0]["arguments"], '{"path":"README.md"}')
+
+    def test_streaming_response_declares_connection_close(self):
+        # Under HTTP/1.1 the SSE stream has no Content-Length and no chunked
+        # framing, so the response MUST send `Connection: close` for the client
+        # to detect end-of-body. Without it, clients hang until timeout and
+        # Codex reports the turn (e.g. /review) as interrupted.
+        FakeUsaiState.reset()
+        FakeUsaiState.stream = True
+        FakeUsaiState.stream_chunks = [
+            {"choices": [{"delta": {"content": "hello"}}]},
+        ]
+        with ServerFixture(FakeUsaiHandler) as upstream, run_proxy(upstream.url) as base_url:
+            req = urllib.request.Request(
+                base_url + "/responses",
+                data=json.dumps({"model": "gpt-test", "input": "hi", "stream": True}).encode(),
+                headers={"Content-Type": "application/json", "Authorization": "Bearer test-key"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                connection_header = resp.headers.get("Connection")
+                body = resp.read().decode()
+
+        self.assertEqual((connection_header or "").lower(), "close")
+        self.assertIn("data: [DONE]", body)
+
+
+class CatalogTests(unittest.TestCase):
+    def test_build_catalog_clones_matching_bundled_entry(self):
+        bundled = [
+            {"slug": "gpt-5.5", "context_window": 1},
+            {"slug": "gpt-6", "context_window": 2},
+            {"slug": "gpt-6.1", "context_window": 3},
+        ]
+        models = build_catalog(
+            ["gpt-6.1-guardrails", "claude-opus-5", "text-embedding-005"], bundled
+        )
+
+        by_slug = {m["slug"]: m for m in models}
+        self.assertEqual(set(by_slug), {"gpt-6.1-guardrails", "claude-opus-5"})
+        self.assertEqual(by_slug["gpt-6.1-guardrails"]["context_window"], 3)
+        self.assertEqual(by_slug["claude-opus-5"]["context_window"], 1)
 
 
 if __name__ == "__main__":
